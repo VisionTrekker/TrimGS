@@ -96,7 +96,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     pipe_params = "\n".join([f'{k}: {v}' for k, v in vars(pipe).items()])
     logging.info(f"Pipeline params:\n{pipe_params}")
     gaussians = GaussianModel(dataset.sh_degree)
-    scene = Scene(dataset, gaussians, pretrained_ply_path=pretrained_ply)
+    scene = Scene(dataset, gaussians, pretrained_ply_path=pretrained_ply)   # 加载train阶段训练好的高斯模型
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -331,7 +331,7 @@ if __name__ == "__main__":
     # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
     lp = ModelParams(parser)
-    op = FinetuneParams(parser)
+    op = FinetuneParams(parser) # 这里的op加载的是arguments/__init__中FinetuneParams的参数
     pp = PipelineParams(parser)
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
@@ -342,7 +342,7 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument("--pretrained_ply", type=str, default = None)
-    parser.add_argument("--split", type=str, default = "mix")
+    parser.add_argument("--split", type=str, default = "mix")   # 增稠的方式，默认为"mix"使用原始的增稠+scale control的；"ordinary"使用默认的；"split"只使用scale control的；"none"不增稠
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
