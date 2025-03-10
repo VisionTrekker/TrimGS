@@ -88,14 +88,21 @@ def prune_low_contribution_gaussians(gaussians, cameras, pipe, bg, K=5, prune_ra
 
 
 def normal_regularization(viewpoint_cam, gaussians, pipe, bg, visibility_filter, depth_grad_thresh=-1.0, close_thresh=1.0, dilation=2, depth_grad_mask_dilation=0):
+    """
+        depth_grad_thresh: 深度梯度阈值，0.05
+        close_thresh: 1.0
+        dilation: 2
+        depth_grad_mask_dilation: 1
+    """
     pos3D = gaussians.get_xyz
-    pos3D = torch.cat((pos3D, torch.ones_like(pos3D[:, :1])), dim=1) @ viewpoint_cam.world_view_transform
+    pos3D = torch.cat((pos3D, torch.ones_like(pos3D[:, :1])), dim=1) @ viewpoint_cam.world_view_transform   # 相机坐标系下的高斯中心
     gs_camera_z = pos3D[:, 2:3]
-    depth_map = render(viewpoint_cam, gaussians, pipe, bg, override_color=gs_camera_z.repeat(1, 3))["render"][0]
+    # 渲染的深度图
+    depth_map = render(viewpoint_cam, gaussians, pipe, bg, override_color=gs_camera_z.repeat(1, 3))["render"][0]    # (H,W)
     if depth_grad_thresh > 0:
-        depth_grad_x, depth_grad_y = compute_gradient(depth_map[None, None])
+        depth_grad_x, depth_grad_y = compute_gradient(depth_map[None, None])    # 渲染深度图计算梯度
         depth_grad_mag = torch.sqrt(depth_grad_x ** 2 + depth_grad_y ** 2).squeeze()
-        depth_grad_weight = (depth_grad_mag < depth_grad_thresh).float()
+        depth_grad_weight = (depth_grad_mag < depth_grad_thresh).float()    # 深度梯度 < 阈值
         if depth_grad_mask_dilation > 0:
             mask_di = depth_grad_mask_dilation
             depth_grad_weight = -1 * F.max_pool2d(-1 * depth_grad_weight[None, None, ...], mask_di * 2 + 1, stride=1, padding=mask_di).squeeze()
@@ -104,9 +111,9 @@ def normal_regularization(viewpoint_cam, gaussians, pipe, bg, visibility_filter,
         0.5 / depth_map.shape[-1], 1 - 0.5 / depth_map.shape[-1], depth_map.shape[-1],
         0.5 / depth_map.shape[-2], 1 - 0.5 / depth_map.shape[-2], depth_map.shape[-2], depth_map.device
     )
-    depth = depth_map.view(-1, 1)
+    depth = depth_map.view(-1, 1)   #
     # pixel to NDC
-    pos = 2 * grid - 1
+    pos = 2 * grid - 1  # [0,1] -> [-1,1]
     # NDC to camera space
     pos[:, 0:1] = (pos[:, 0:1] - viewpoint_cam.projection_matrix[2, 0]) * depth / viewpoint_cam.projection_matrix[0, 0]
     pos[:, 1:2] = (pos[:, 1:2] - viewpoint_cam.projection_matrix[2, 1]) * depth / viewpoint_cam.projection_matrix[1, 1]

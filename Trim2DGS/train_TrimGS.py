@@ -39,12 +39,13 @@ except ImportError:
 #     pass
 
 def culling(xyz, cams, expansion=2):
-    cam_centers = torch.stack([c.camera_center for c in cams], 0).to(xyz.device)
+    # 获取所有训练相机中心世界坐标
+    cam_centers = torch.stack([c.camera_center for c in cams], 0).to(xyz.device)    # (N,3)
     span_x = cam_centers[:, 0].max() - cam_centers[:, 0].min()
     span_y = cam_centers[:, 1].max() - cam_centers[:, 1].min() # smallest span
     span_z = cam_centers[:, 2].max() - cam_centers[:, 2].min()
 
-    scene_center = cam_centers.mean(0)
+    scene_center = cam_centers.mean(0)  # (3,)
 
     span_x = span_x * expansion
     span_y = span_y * expansion
@@ -59,7 +60,7 @@ def culling(xyz, cams, expansion=2):
     z_min = scene_center[2] - span_x / 2
     z_max = scene_center[2] + span_x / 2
 
-
+    # 取出方形大包围盒（2倍原相机包围盒长度）内的高斯
     valid_mask = (xyz[:, 0] > x_min) & (xyz[:, 0] < x_max) & \
                  (xyz[:, 1] > y_min) & (xyz[:, 1] < y_max) & \
                  (xyz[:, 2] > z_min) & (xyz[:, 2] < z_max)
@@ -68,8 +69,15 @@ def culling(xyz, cams, expansion=2):
     return valid_mask, scene_center
 
 def prune_low_contribution_gaussians(gaussians, cameras, pipe, bg, K=5, prune_ratio=0.1):
+    """
+    剪枝掉低贡献度的高斯
+        cameras: 所有训练相机
+        K: 只计算各高斯 贡献度前5视角 的平均贡献度
+        prune_ratio: 剪枝率，默认 0.1
+    """
     top_list = [None, ] * K
     for i, cam in enumerate(cameras):
+        # 所有高斯 对当前图像的贡献度 = 所有高斯对当前图像覆盖的像素的平均贡献度。(N,)
         trans = render(cam, gaussians, pipe, bg, record_transmittance=True)
         if top_list[0] is not None:
             m = trans > top_list[0]
@@ -80,13 +88,17 @@ def prune_low_contribution_gaussians(gaussians, cameras, pipe, bg, K=5, prune_ra
         else:
             top_list = [trans.clone() for _ in range(K)]
 
-    contribution = torch.stack(top_list, dim=-1).mean(-1)
-    tile = torch.quantile(contribution, prune_ratio)
+    contribution = torch.stack(top_list, dim=-1).mean(-1)   # 各高斯 对所有训练相机前K个贡献度的 平均值
+    tile = torch.quantile(contribution, prune_ratio)    # 10%时的贡献度
+    # 剪枝掉 贡献度<10%的值 的高斯
     prune_mask = contribution < tile
     gaussians.prune_points(prune_mask)
     torch.cuda.empty_cache()
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, split):
+    """
+        split: 分裂策略，默认 mix
+    """
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     model_params = "\n".join([f'{k}: {v}' for k, v in vars(dataset).items()])
@@ -95,6 +107,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     logging.info(f"Finetune Params:\n{fine_tune_params}")
     pipe_params = "\n".join([f'{k}: {v}' for k, v in vars(pipe).items()])
     logging.info(f"Pipeline params:\n{pipe_params}")
+
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
@@ -146,25 +159,29 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         rend_normal  = render_pkg['rend_normal']
         surf_normal = render_pkg['surf_normal']
 
-        depth_map = render_pkg["surf_depth"][0]
+        depth_map = render_pkg["surf_depth"][0] # 相机坐标系下的渲染depth。(1,H,W)
         if opt.depth_grad_thresh > 0:
-            depth_map_for_grad = depth_map[None, None]
+            # 设定了深度梯度阈值
+            depth_map_for_grad = depth_map[None, None]  # (1,1,H,W)
             sobel_kernel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=depth_map.dtype, device=depth_map.device).view(1, 1, 3, 3)
             sobel_kernel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=depth_map.dtype, device=depth_map.device).view(1, 1, 3, 3)
 
             depth_map_for_grad = F.pad(depth_map_for_grad, pad=(1, 1, 1, 1), mode="replicate")
+            # 计算渲染深度图的梯度
             depth_grad_x = F.conv2d(depth_map_for_grad, sobel_kernel_x) / 3
             depth_grad_y = F.conv2d(depth_map_for_grad, sobel_kernel_y) / 3
             depth_grad_mag = torch.sqrt(depth_grad_x ** 2 + depth_grad_y ** 2)
-            depth_grad_weight = (depth_grad_mag < opt.depth_grad_thresh).float()
+
+            depth_grad_weight = (depth_grad_mag < opt.depth_grad_thresh).float()    # < 0.03
             if opt.depth_grad_mask_dilation > 0:
-                mask_di = opt.depth_grad_mask_dilation
+                mask_di = opt.depth_grad_mask_dilation  # 1
                 depth_grad_weight = -1 * F.max_pool2d(-1 * depth_grad_weight, mask_di * 2 + 1, stride=1, padding=mask_di)
             depth_grad_weight = depth_grad_weight.squeeze().detach()
             normal_error = (1 - (rend_normal * surf_normal).sum(dim=0)) * depth_grad_weight
             normal_error = normal_error[None]
         else:
             normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
+
         normal_loss = lambda_normal * (normal_error).mean()
         dist_loss = lambda_dist * (rend_dist).mean()
 
@@ -187,7 +204,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     "Loss": f"{ema_loss_for_log:.{5}f}",
                     "distort": f"{ema_dist_for_log:.{5}f}",
                     "normal": f"{ema_normal_for_log:.{5}f}",
-                    "Points": f"{len(gaussians.get_xyz)}"
+                    "Points": f"{gaussians.get_xyz.shape[0]}"
                 }
                 progress_bar.set_postfix(loss_dict)
 
@@ -217,15 +234,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         gaussians.densify_and_prune(opt.densify_grad_threshold, opt.opacity_cull, scene.cameras_extent, max_screen_size=opt.max_screen_size)
 
                     elif split == "scale":
+                        # 获取 所有高斯在两倍相机包围盒内的mask (N,) 与 所有训练相机的中心位置
                         scene_mask, scene_center = culling(gaussians.get_xyz, scene.getTrainCameras())
                         gaussians.densify_and_scale_split(opt.densify_grad_threshold, opt.opacity_cull, scene.cameras_extent, opt.max_screen_size, opt.densify_scale_factor, scene_mask, N=3, no_grad=True)
 
                     elif split == "mix":
                         grads = gaussians.xyz_gradient_accum / gaussians.denom
                         grads[grads.isnan()] = 0.0
+                        # 克隆：       中心位置梯度 >= 阈值 && 轴长 <= 0.01*训练相机半径
+                        # 分裂为2个：   中心位置梯度 >= 阈值 && 轴长  > 0.01*训练相机半径
                         gaussians.densify_and_clone(grads, opt.densify_grad_threshold, scene.cameras_extent)
                         gaussians.densify_and_split(grads, opt.densify_grad_threshold, scene.cameras_extent)
+                        # 计算高斯分布在所有训练相机bbox内的mask
                         scene_mask, scene_center = culling(gaussians.get_xyz, scene.getTrainCameras())
+                        # 分裂为3个：   在训练相机包围盒内 && (投影半径像素长度>20 || 轴长 > 0.01*训练相机半径*调节因子(<1.0))
+                        # 剪枝：       不透明度 < 阈值
                         gaussians.densify_and_scale_split(opt.densify_grad_threshold, opt.opacity_cull, scene.cameras_extent, opt.max_screen_size, opt.densify_scale_factor, scene_mask, N=3, no_grad=True)
 
                     elif split == "none":
@@ -234,6 +257,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         raise ValueError(f"Unknown split type {split}")
 
                 if iteration > opt.contribution_prune_from_iter and iteration % opt.contribution_prune_interval == 0:
+                    # 1000 - 15000代开始每500代修剪一次，去除贡献度最低10%的高斯
                     prune_low_contribution_gaussians(gaussians, all_cameras, pipe, background, K=5, prune_ratio=opt.contribution_prune_ratio)
                     print(f'Num gs after contribution prune: {len(gaussians.get_xyz)}')
 
@@ -262,7 +286,7 @@ def prepare_output_and_logger(args):
     os.makedirs(args.model_path, exist_ok = True)
     with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
-
+    # 创建log保存文件
     logging.basicConfig(filename=os.path.join(args.model_path, "training.log"), level=logging.INFO, format='%(asctime)s - %(message)s', datefmt='%d-%b-%y %H:%M:%S')
     # Create Tensorboard writer
     tb_writer = None

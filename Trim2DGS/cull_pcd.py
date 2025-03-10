@@ -24,11 +24,16 @@ def cull_pcd(dataset : ModelParams, iteration : int, pipeline : PipelineParams):
 
         with torch.no_grad():
             prune_mask = torch.zeros(gaussians.get_xyz.shape[0], dtype=torch.bool, device="cuda")
+            # 遍历所有训练相机
             for view in train_cameras:
-                p_homo = gaussians.get_xyz @ view.full_proj_transform[:3] + view.full_proj_transform[3]
-                p_ndc = p_homo[:, :2] / (p_homo[:, 3:4] + 1e-6)
-                view_mask = (p_ndc[:, 0] >= -1) & (p_ndc[:, 0] <= 1) & (p_ndc[:, 1] >= -1) & (p_ndc[:, 1] <= 1)
+                # 高斯 世界坐标系 转换到 NDC
+                p_homo = gaussians.get_xyz @ view.full_proj_transform[:3] + view.full_proj_transform[3] # 齐次坐标
+                p_ndc = p_homo[:, :2] / (p_homo[:, 3:4] + 1e-6) # 归一化到NDC。(N,2)。范围[-1,1]
+
+                view_mask = (p_ndc[:, 0] >= -1) & (p_ndc[:, 0] <= 1) & (p_ndc[:, 1] >= -1) & (p_ndc[:, 1] <= 1) # -1,1的立方体中
+                # F.grid_sample：从输入张量中根据给定的采样网格进行采样。输入张量(N,C,H,W)，采样网格(N,H,W,2)。
                 alpha_mask = F.grid_sample(view.gt_alpha_mask[None], p_ndc[view_mask][None, None], mode="nearest", align_corners=True).squeeze() < 0.5
+                # 剪枝的mask
                 prune_mask[view_mask.nonzero()] |= alpha_mask.unsqueeze(-1)
             gaussians.prune_points_without_optimizer(prune_mask)
         output = os.path.join(dataset.model_path, "point_cloud/iteration_{}".format(iteration), "point_cloud_culled.ply")

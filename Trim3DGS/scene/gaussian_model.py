@@ -508,6 +508,10 @@ class FlattenGaussianModel(GaussianModel):
 
     @property
     def get_scaling(self):
+        """
+        模型轴长只有2维，添加最短轴到第1维
+            return: 返回3维的轴长
+        """
         self.s0 = torch.ones_like(self._scaling[:, :1]) * self.eps_s0
         return torch.cat((self.s0, self.scaling_activation(self._scaling[:, [-2, -1]])), dim=1)
 
@@ -529,7 +533,7 @@ class FlattenGaussianModel(GaussianModel):
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
-        scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 2)
+        scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 2)    # 只有2个轴
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         rots[:, 0] = 1
 
@@ -565,6 +569,7 @@ class FlattenGaussianModel(GaussianModel):
         f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
         f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
         opacities = self._opacity.detach().cpu().numpy()
+        # 将设定的最短轴（长度为1e-8）作第1维。
         inverse_eps_s0 = self.scaling_inverse_activation(torch.tensor(self.eps_s0, device=self._scaling.device))
         _scaling = torch.cat((torch.ones_like(self._scaling[:, :1]) * inverse_eps_s0, self._scaling[:, [-2, -1]]), dim=1)
         scale = _scaling.detach().cpu().numpy()
@@ -619,7 +624,7 @@ class FlattenGaussianModel(GaussianModel):
         self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
         self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
-        self._scaling = nn.Parameter(torch.tensor(scales[:, 1:], dtype=torch.float, device="cuda").requires_grad_(True))
+        self._scaling = nn.Parameter(torch.tensor(scales[:, 1:], dtype=torch.float, device="cuda").requires_grad_(True))    # 只加载 后两维
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
 
         self.active_sh_degree = self.max_sh_degree

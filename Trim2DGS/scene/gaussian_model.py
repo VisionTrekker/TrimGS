@@ -393,26 +393,44 @@ class GaussianModel:
         self.prune_points(prune_filter)
 
     def densify_and_scale_split(self, grad_threshold, min_opacity, scene_extent, max_screen_size, scale_factor, scene_mask, N=2, no_grad=False):
+        """
+        降低高斯轴长判定阈值的分裂策略：(在训练相机bbox内的、轴长或像素尺寸 > 阈值) 或 (梯度 > 阈值)
+            grad_threshold  梯度最大阈值 0.0002
+            min_opacity     不透明度最小阈值 0.05
+            scene_extent    所有训练相机包围圈半径的1.1倍
+            max_screen_size 投影到像素平面的尺寸最大阈值 20
+            scale_factor    轴长阈值的调节因子 0.5
+            scene_mask      高斯分布在所有训练相机bbox内的mask
+            N       一个大高斯分裂成小高斯的个数
+            no_grad 是否考虑梯度阈值判定
+        """
         assert scale_factor > 0
         n_init_points = self.get_xyz.shape[0]
+        # 条件1：最大轴长 > 0.01 * 轴长阈值的调节因子 * 所有训练相机包围圈半径的1.1倍
         scale_mask = torch.max(self.get_scaling, dim=1).values > self.percent_dense * scene_extent * scale_factor
         if max_screen_size:
+            # 条件2：投影到所有像素平面的最大半径 > 20
             scale_mask = torch.logical_or(
                 scale_mask,
                 self.max_radii2D > max_screen_size
             )
+        # 条件3：在训练相机bbox内
         scale_mask = torch.logical_and(scene_mask, scale_mask)
+
         if no_grad:
             selected_pts_mask = scale_mask
         else:
-            # Extract points that satisfy the gradient condition
+            # 进行梯度阈值判定
             grads = self.xyz_gradient_accum / self.denom
             grads[grads.isnan()] = 0.0
             padded_grad = torch.zeros((n_init_points), device="cuda")
             padded_grad[:grads.shape[0]] = grads.squeeze()
+            # 条件4：梯度 > 梯度阈值
             selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
             selected_pts_mask = torch.logical_or(selected_pts_mask, scale_mask)
+        # 即满足：(在训练相机bbox内的、轴长或像素尺寸 > 阈值) 或 (梯度 > 阈值)
 
+        # 将大高斯分裂成 N个小高斯
         stds = self.get_scaling[selected_pts_mask].repeat(N,1)
         stds = torch.cat([stds, 0 * torch.ones_like(stds[:,:1])], dim=-1)
         means = torch.zeros_like(stds)
@@ -427,6 +445,7 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation)
 
+        # 剪枝：(去掉原有的大高斯，不去掉新的小高斯) 或 (<不透明度阈值的高斯)
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         prune_filter = torch.logical_or(prune_filter, (self.get_opacity < min_opacity).squeeze())
         self.prune_points(prune_filter)

@@ -152,7 +152,7 @@ class TrimGSOptimizationParams(ParamGroup):
         self.densify_from_iter = 500
         self.densify_until_iter = 15_000
         self.densify_grad_threshold = 0.0002
-        self.densify_scale_factor = 0.3
+        self.densify_scale_factor = 0.3     # 分裂中 轴长阈值的调节因子
 
         self.contribution_prune_from_iter = 500
         self.contribution_prune_interval = 300
